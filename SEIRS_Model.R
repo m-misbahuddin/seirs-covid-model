@@ -104,9 +104,75 @@ lhs_params <- apply(lhs_samples, 2, function(x, range) {
 colnames(lhs_params) <- c("Beta", "sigma", "sigmaSE", "gamma", "xi", "rho",
                           "theta", "mu", "S_init", "E_init", "I_init")
 
+# Define the 'pomp' model with data, processes, and measurement models
+pomp_model <- pomp(
+  data = data.frame(cases = data$Count.of.Covid.Infected, time = data$time),  # Observed data
+  times = "time",    # Time variable in the data
+  t0 = 0,            # Initial time point
+  rprocess = euler(seir_step, delta.t = 1/10),
+  rinit = rinit,
+  # Measurement model: Negative binomial distribution for overdispersed count data
+  rmeasure = Csnippet("
+    cases = rnbinom_mu(theta, rho * I);
+  "),
+  dmeasure = Csnippet("
+      // Standard Negative Binomial log-likelihood calculation
+      lik = dnbinom_mu(cases, theta, rho * I + 1e-6, give_log);
+      // Check for numerical issues
+      if (!isfinite(lik)) {
+        lik = log(1e-100);  // Fallback for non-finite log-likelihood
+      }
+  "),
+  statenames = c("S", "E", "I", "R", "N"),  # State variables
+  obsnames = "cases",
+  paramnames = c("Beta", "sigma","sigmaSE", "gamma", "xi", "rho", "theta", "mu", "N0", "S_init","E_init","I_init"),  # Parameters
+  params = params,  # Initial parameter values
+  partrans=parameter_trans(toEst=SEIRS_untrans, fromEst=SEIRS_trans) # Parameter transformations
+)
+
+# rebuild your pomp_model with the fixes above...
+sim1 <- simulate(pomp_model, nsim=1, format="data.frame")
+
+# simulate 1 realization as a data.frame
+sim1 <- simulate(
+  object       = pomp_model,
+  nsim         = 50,
+  params       = coef(pomp_model),   # or your named params vector
+  format       = "data.frame",        # <— replaces as.data.frame
+  include.data = FALSE                # keep your simulated obs off the data‐frame
+)
+
+head(sim1)
+str(sim1)
+
+coef(pomp_model)["Beta"]
+
+ggplot(sim1, aes(x = time, y = I, group = .id)) +
+  geom_line(alpha = 0.3) +
+  labs(title = "Infectious Trajectories (All Simulations)", y = "Infectious") +
+  theme_minimal()
+
+
+# quick ggplot of the 4 compartments
+ggplot(sim1, aes(x = time)) +
+  geom_line(aes(y = S, color = "Susceptible")) +
+  geom_line(aes(y = E, color = "Exposed"))     +
+  geom_line(aes(y = I, color = "Infectious"))  +
+  geom_line(aes(y = R, color = "Recovered"))   +
+  labs(
+    title = "One SEIRS Realization",
+    x     = "time (days)",
+    y     = "count",
+    color = "compartment"
+  ) +
+  theme_minimal()
 #----------------------------------------
 # Parallelizing the 'mif2' Process Over Multiple LHS Samples
 #----------------------------------------
+
+# Detect the number of CPU cores and set up parallel processing
+n_cores <- detectCores() - 1  # Use all but one core to prevent overloading
+print(n_cores)
 
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
@@ -215,18 +281,56 @@ total_secs <- as.numeric(difftime(end_time, start_time, units = "secs"))
 cat("End time:", format(end_time, "%H:%M:%S"), "\n")
 cat("Duration:", floor(total_secs / 60), "minutes", round(total_secs %% 60, 1), "seconds\n")
 
-# Extract successful runs
-success <- vapply(mif_results, function(x) "logLik" %in% names(x), logical(1))
+# Find which runs succeeded
+success <- vapply(mif_results, function(x) is.list(x) && "logLik" %in% names(x), logical(1))
 
 if (!any(success)) {
   errs <- vapply(mif_results, function(x) x$error %||% "<no error>", character(1))
   stop("All mif2 runs failed:\n", paste0("  iter ", seq_along(errs), ": ", errs, collapse = "\n"))
 }
 
-# Extract best result
-best_idx <- which.max(vapply(mif_results[success], `[[`, numeric(1), "logLik"))
-best_run <- mif_results[which(success)[best_idx]]
-cat("\nBest MIF2 run (iteration", best_run$iteration, "):\n")
-cat("Log-likelihood:", best_run$logLik, "\n")
-print(best_run$params)
+# Extract only successful runs
+good_ids  <- which(success)
+good_liks <- vapply(mif_results[good_ids], function(x) x$logLik, numeric(1))
 
+# Get index of best successful run
+best_idx  <- good_ids[which.max(good_liks)]
+best_run  <- mif_results[[best_idx]]
+
+best_run$iteration
+best_run$logLik
+best_run$params
+
+sim_best <- simulate(
+  pomp_model,
+  params = c(best_run$params, N0 = 891705),
+  nsim = 1,
+  format = "data.frame"
+)
+
+ggplot(sim_best, aes(x = time)) +
+  geom_line(aes(y = cases, color = "Simulated Cases")) +
+  geom_point(data = data, aes(x = time, y = cases, color = "Observed Cases")) +
+  labs(title = "Observed vs Simulated Cases", y = "Cases") +
+  theme_minimal()
+
+sim_final <- simulate(
+  object       = pomp_model,
+  nsim         = 50,
+  params       = c(best_run$params, N0 = 891705),
+  format       = "data.frame",
+  include.data = TRUE
+)
+
+ggplot(sim_final, aes(x = time)) +
+  geom_line(aes(y = S, color = "Susceptible")) +
+  geom_line(aes(y = E, color = "Exposed"))     +
+  geom_line(aes(y = I, color = "Infectious"))  +
+  geom_line(aes(y = R, color = "Recovered"))   +
+  labs(
+    title = "SEIRS Realization",
+    x     = "time (days)",
+    y     = "count",
+    color = "compartment"
+  ) +
+  theme_minimal()
