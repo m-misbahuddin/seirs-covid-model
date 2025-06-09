@@ -4,7 +4,7 @@ This repository contains R code for fitting a stochastic SEIRS (Susceptible-Expo
 
 ## Filename
 
-**`SEIRS_MIF2_parallel_fit.R`**
+**`SEIRS_Model.R`**
 
 ## Purpose
 
